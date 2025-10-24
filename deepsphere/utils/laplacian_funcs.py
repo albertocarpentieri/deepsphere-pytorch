@@ -4,7 +4,7 @@
 import numpy as np
 import torch
 from pygsp.graphs.nngraphs.spherehealpix import SphereHealpix
-from pygsp.graphs.nngraphs.sphereicosahedron import SphereIcosahedron
+from pygsp.graphs.nngraphs.sphereicosahedral import SphereIcosahedral
 from pygsp.graphs.sphereequiangular import SphereEquiangular
 from scipy import sparse
 from scipy.sparse import coo_matrix
@@ -33,7 +33,7 @@ def scipy_csr_to_sparse_tensor(csr_mat):
     idx = torch.LongTensor(indices)
     vals = torch.FloatTensor(values)
     shape = coo.shape
-    sparse_tensor = torch.sparse.FloatTensor(idx, vals, torch.Size(shape))
+    sparse_tensor = torch.sparse_coo_tensor(idx, vals, torch.Size(shape))
     sparse_tensor = sparse_tensor.coalesce()
     return sparse_tensor
 
@@ -107,24 +107,28 @@ def get_healpix_laplacians(nodes, depth, laplacian_type):
     return laps[::-1]
 
 
-def get_equiangular_laplacians(nodes, depth, ratio, laplacian_type):
+def get_equiangular_laplacians(nodes, depth, ratio, laplacian_type, pool_factor=4):
     """Get the equiangular laplacian list for a certain depth.
     Args:
         nodes (int): initial number of nodes.
         depth (int): the depth of the UNet.
+        ratio (float): ratio between latitude and longitude dimensions of the data.
         laplacian_type ["combinatorial", "normalized"]: the type of the laplacian.
+        pool_factor (int): pooling factor (kernel size for pooling operations).
 
     Returns:
         laps (list): increasing list of laplacians
     """
     laps = []
     pixel_num = nodes
-    for _ in range(depth):
+    for i in range(depth):
         dim1, dim2 = equiangular_dimension_unpack(pixel_num, ratio)
-        bw1 = equiangular_bandwidth(dim1)
-        bw2 = equiangular_bandwidth(dim2)
-        bw = [bw1, bw2]
-        G = SphereEquiangular(bandwidth=bw, sampling="SOFT")
+        # Create laplacian for the graph at this pooling level
+        # Each dimension is reduced by factor of pool_factor
+        current_dim1 = dim1 // (pool_factor**i)
+        current_dim2 = dim2 // (pool_factor**i)
+        
+        G = SphereEquiangular(size=[current_dim1, current_dim2])
         G.compute_laplacian(laplacian_type)
         laplacian = prepare_laplacian(G.L)
         laps.append(laplacian)

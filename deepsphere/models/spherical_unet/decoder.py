@@ -80,42 +80,138 @@ class SphericalChebBNPoolConcat(nn.Module):
         return x
 
 
+class SphericalChebBNPoolConcatFixed(nn.Module):
+    """Fixed version of SphericalChebBNPoolConcat that properly handles channel mismatches."""
+
+    def __init__(self, in_channels, out_channels, skip_channels, lap, pooling, kernel_size):
+        """Initialization.
+
+        Args:
+            in_channels (int): input channels from previous decoder layer.
+            out_channels (int): target channels after unpooling.
+            skip_channels (int): channels from skip connection.
+            lap (:obj:`torch.sparse.FloatTensor`): laplacian.
+            pooling (:obj:`torch.nn.Module`): pooling/unpooling module.
+            kernel_size (int, optional): polynomial degree.
+        """
+        super().__init__()
+        # Step 1: Unpool + conv to target resolution and channels
+        self.spherical_cheb_bn_pool = SphericalChebBNPool(in_channels, out_channels, lap, pooling, kernel_size)
+        # Step 2: Process concatenated features
+        concat_channels = out_channels + skip_channels
+        self.spherical_cheb_bn = SphericalChebBN(concat_channels, out_channels, lap, kernel_size)
+
+    def forward(self, x, concat_data):
+        """Forward Pass.
+
+        Args:
+            x (:obj:`torch.Tensor`): input [batch x vertices x channels/features]
+            concat_data (:obj:`torch.Tensor`): encoder layer output [batch x vertices x channels/features]
+
+        Returns:
+            :obj:`torch.Tensor`: output [batch x vertices x channels/features]
+        """
+        # Step 1: Unpool and conv to target channels
+        x = self.spherical_cheb_bn_pool(x)
+        # Step 2: Concatenate with skip connection
+        x = torch.cat((x, concat_data), dim=2)
+        # Step 3: Project concatenated features to target channels
+        x = self.spherical_cheb_bn(x)
+        return x
+
+
 class Decoder(nn.Module):
     """The decoder of the Spherical UNet.
     """
 
-    def __init__(self, unpooling, laps, kernel_size):
+    def __init__(self, unpooling, laps, kernel_size, depth, output_channels=3, embed_size=64):
         """Initialization.
 
         Args:
             unpooling (:obj:`torch.nn.Module`): The unpooling object.
             laps (list): List of laplacians.
+            kernel_size (int): polynomial degree.
+            depth (int): Number of decoding levels.
+            output_channels (int): Number of output channels.
+            embed_size (int): Base embedding dimension, must match encoder's embed_size.
         """
         super().__init__()
         self.unpooling = unpooling
         self.kernel_size = kernel_size
-        self.dec_l1 = SphericalChebBNPoolConcat(512, 512, laps[1], self.unpooling, self.kernel_size)
-        self.dec_l2 = SphericalChebBNPoolConcat(512, 256, laps[2], self.unpooling, self.kernel_size)
-        self.dec_l3 = SphericalChebBNPoolConcat(256, 128, laps[3], self.unpooling, self.kernel_size)
-        self.dec_l4 = SphericalChebBNPoolConcat(128, 64, laps[4], self.unpooling, self.kernel_size)
-        self.dec_l5 = SphericalChebBNPoolCheb(64, 32, 3, laps[5], self.unpooling, self.kernel_size)
-        # Switch from Logits to Probabilities if evaluating model
-        self.softmax = nn.Softmax(dim=2)
+        self.depth = depth
+        self.output_channels = output_channels
+        self.embed_size = embed_size
+        
+        # Use configurable embed_size with scaling pattern:
+        # Decoder reverses the encoder pattern: embed_size*X -> embed_size*(X/2)
+        # For depth=2: encoder outputs [embed_size*2, embed_size]
+        # For depth=3: encoder outputs [embed_size*4, embed_size*2, embed_size]  
+        # For depth=4: encoder outputs [embed_size*8, embed_size*4, embed_size*2, embed_size]
+        
+        if depth == 2:
+            # Decoder: embed_size*2 -> embed_size (with skip embed_size), then embed_size -> output
+            self.decoder_layers = nn.ModuleList([
+                SphericalChebBNPoolConcatFixed(embed_size*2, embed_size, embed_size, laps[1], self.unpooling, self.kernel_size),
+                SphericalChebConv(embed_size, output_channels, laps[1], self.kernel_size)  # Final conv, no pooling
+            ])
+        elif depth == 3:
+            # Decoder: embed_size*4 -> embed_size*2 (with skip embed_size*2), embed_size*2 -> embed_size (with skip embed_size), then embed_size -> output
+            self.decoder_layers = nn.ModuleList([
+                SphericalChebBNPoolConcatFixed(embed_size*4, embed_size*2, embed_size*2, laps[1], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*2, embed_size, embed_size, laps[2], self.unpooling, self.kernel_size),
+                SphericalChebConv(embed_size, output_channels, laps[2], self.kernel_size)  # Final conv, no pooling
+            ])
+        elif depth == 4:
+            # Decoder: embed_size*8 -> embed_size*4 (with skip embed_size*4), embed_size*4 -> embed_size*2 (with skip embed_size*2), embed_size*2 -> embed_size (with skip embed_size), then embed_size -> output
+            self.decoder_layers = nn.ModuleList([
+                SphericalChebBNPoolConcatFixed(embed_size*8, embed_size*4, embed_size*4, laps[1], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*4, embed_size*2, embed_size*2, laps[2], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*2, embed_size, embed_size, laps[3], self.unpooling, self.kernel_size),
+                SphericalChebConv(embed_size, output_channels, laps[3], self.kernel_size)  # Final conv, no pooling
+            ])
+        elif depth == 5:
+            # Decoder: embed_size*8 -> embed_size*4 (with skip embed_size*4), embed_size*4 -> embed_size*2 (with skip embed_size*2), embed_size*2 -> embed_size (with skip embed_size), then embed_size -> output
+            self.decoder_layers = nn.ModuleList([
+                SphericalChebBNPoolConcatFixed(embed_size*16, embed_size*8, embed_size*8, laps[1], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*8, embed_size*4, embed_size*4, laps[2], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*4, embed_size*2, embed_size*2, laps[3], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*2, embed_size, embed_size, laps[4], self.unpooling, self.kernel_size),
+                SphericalChebConv(embed_size, output_channels, laps[4], self.kernel_size)  # Final conv, no pooling
+            ])
+        elif depth == 6:
+            # Decoder: embed_size*8 -> embed_size*4 (with skip embed_size*4), embed_size*4 -> embed_size*2 (with skip embed_size*2), embed_size*2 -> embed_size (with skip embed_size), then embed_size -> output
+            self.decoder_layers = nn.ModuleList([
+                SphericalChebBNPoolConcatFixed(embed_size*32, embed_size*16, embed_size*16, laps[1], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*16, embed_size*8, embed_size*8, laps[2], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*8, embed_size*4, embed_size*4, laps[3], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*4, embed_size*2, embed_size*2, laps[4], self.unpooling, self.kernel_size),
+                SphericalChebBNPoolConcatFixed(embed_size*2, embed_size, embed_size, laps[5], self.unpooling, self.kernel_size),
+                SphericalChebConv(embed_size, output_channels, laps[5], self.kernel_size)  # Final conv, no pooling
+            ])
+        else:
+            raise ValueError(f"Depth {depth} not supported yet. Please use depth 2, 3, or 4.")
+        
 
-    def forward(self, x_enc0, x_enc1, x_enc2, x_enc3, x_enc4):
+    def forward(self, encoder_outputs):
         """Forward Pass.
 
         Args:
-            x_enc* (:obj:`torch.Tensor`): input tensors.
+            encoder_outputs (list): List of encoder output tensors from coarsest to finest.
 
         Returns:
             :obj:`torch.Tensor`: output after forward pass.
         """
-        x = self.dec_l1(x_enc0, x_enc1)
-        x = self.dec_l2(x, x_enc2)
-        x = self.dec_l3(x, x_enc3)
-        x = self.dec_l4(x, x_enc4)
-        x = self.dec_l5(x)
-        if not self.training:
-            x = self.softmax(x)
+        # Start with the coarsest encoder output
+        x = encoder_outputs[0]
+        
+        # Process through intermediate decoder layers (with skip connections)
+        for i, layer in enumerate(self.decoder_layers[:-1]):
+            skip_connection = encoder_outputs[i + 1]
+            x = layer(x, skip_connection)
+        
+        # Final decoder layer (no skip connection)
+        x = self.decoder_layers[-1](x)
+        
+        # if not self.training:
+        #     x = self.softmax(x)
         return x

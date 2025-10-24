@@ -18,7 +18,7 @@ class SphericalUNet(nn.Module):
     """Spherical GCNN Autoencoder.
     """
 
-    def __init__(self, pooling_class, N, depth, laplacian_type, kernel_size, ratio=1):
+    def __init__(self, pooling_class, N, depth, laplacian_type, kernel_size, ratio=1, pool_factor=4, output_channels=3, input_channels=16, embed_size=64):
         """Initialization.
 
         Args:
@@ -27,10 +27,15 @@ class SphericalUNet(nn.Module):
             depth (int): The depth of the UNet, which is bounded by the N and the type of pooling
             kernel_size (int): chebychev polynomial degree
             ratio (float): Parameter for equiangular sampling
+            pool_factor (int): Pooling factor (kernel size for pooling operations)
+            output_channels (int): Number of output channels (default: 3)
+            input_channels (int): Number of input channels (default: 16)
+            embed_size (int): Base embedding dimension, scales up through the network (default: 64)
         """
         super().__init__()
         self.ratio = ratio
         self.kernel_size = kernel_size
+        self.pool_factor = pool_factor
         if pooling_class == "icosahedron":
             self.pooling_class = Icosahedron()
             self.laps = get_icosahedron_laplacians(N, depth, laplacian_type)
@@ -38,13 +43,13 @@ class SphericalUNet(nn.Module):
             self.pooling_class = Healpix()
             self.laps = get_healpix_laplacians(N, depth, laplacian_type)
         elif pooling_class == "equiangular":
-            self.pooling_class = Equiangular()
-            self.laps = get_equiangular_laplacians(N, depth, self.ratio, laplacian_type)
+            self.pooling_class = Equiangular(ratio=self.ratio, pool_factor=pool_factor)
+            self.laps = get_equiangular_laplacians(N, depth, self.ratio, laplacian_type, pool_factor)
         else:
             raise ValueError("Error: sampling method unknown. Please use icosahedron, healpix or equiangular.")
 
-        self.encoder = Encoder(self.pooling_class.pooling, self.laps, self.kernel_size)
-        self.decoder = Decoder(self.pooling_class.unpooling, self.laps, self.kernel_size)
+        self.encoder = Encoder(self.pooling_class.pooling, self.laps, self.kernel_size, depth, input_channels, embed_size)
+        self.decoder = Decoder(self.pooling_class.unpooling, self.laps, self.kernel_size, depth, output_channels, embed_size)
 
     def forward(self, x):
         """Forward Pass.
@@ -55,8 +60,8 @@ class SphericalUNet(nn.Module):
         Returns:
             :obj:`torch.Tensor`: output
         """
-        x_encoder = self.encoder(x)
-        output = self.decoder(*x_encoder)
+        encoder_outputs = self.encoder(x)
+        output = self.decoder(encoder_outputs)
         return output
 
 

@@ -47,14 +47,15 @@ class EquiangularMaxPool(nn.MaxPool1d):
     """EquiAngular Maxpooling module using MaxPool 1d from torch
     """
 
-    def __init__(self, ratio, return_indices=False):
+    def __init__(self, ratio, pool_factor=4, return_indices=False):
         """Initialization
 
         Args:
             ratio (float): ratio between latitude and longitude dimensions of the data
+            pool_factor (int): pooling factor (kernel size for pooling)
         """
         self.ratio = ratio
-        super().__init__(kernel_size=4, return_indices=return_indices)
+        super().__init__(kernel_size=pool_factor, return_indices=return_indices)
 
     def forward(self, x):
         """calls Maxpool1d and if desired, keeps indices of the pixels pooled to unpool them
@@ -86,14 +87,15 @@ class EquiangularAvgPool(nn.AvgPool1d):
     """EquiAngular Average Pooling using Average Pooling 1d from pytorch
     """
 
-    def __init__(self, ratio):
+    def __init__(self, ratio, pool_factor=4):
         """Initialization
 
         Args:
             ratio (float): ratio between latitude and longitude dimensions of the data
+            pool_factor (int): pooling factor (kernel size for pooling)
         """
         self.ratio = ratio
-        super().__init__(kernel_size=4)
+        super().__init__(kernel_size=pool_factor)
 
     def forward(self, x):
         """calls Avgpool1d
@@ -116,14 +118,15 @@ class EquiangularMaxUnpool(nn.MaxUnpool1d):
     """Equiangular Maxunpooling using the MaxUnpool1d of pytorch
     """
 
-    def __init__(self, ratio):
+    def __init__(self, ratio, pool_factor=4):
         """Initialization
 
         Args:
             ratio (float): ratio between latitude and longitude dimensions of the data
+            pool_factor (int): pooling factor (kernel size for unpooling)
         """
         self.ratio = ratio
-        super().__init__(kernel_size=4)
+        super().__init__(kernel_size=pool_factor)
 
     def forward(self, x, indices):
         """calls MaxUnpool1d using the indices returned previously by EquiAngMaxPool
@@ -137,7 +140,7 @@ class EquiangularMaxUnpool(nn.MaxUnpool1d):
         """
         x, _ = equiangular_calculator(x, self.ratio)
         x = x.permute(0, 3, 1, 2)
-        x = F.max_unpool2d(x, indices, kernel_size=(4, 4))
+        x = F.max_unpool2d(x, indices, kernel_size=(self.kernel_size, self.kernel_size))
         x = reformat(x)
         return x
 
@@ -146,14 +149,15 @@ class EquiangularAvgUnpool(nn.Module):
     """EquiAngular Average Unpooling version 1 using the interpolate function when unpooling
     """
 
-    def __init__(self, ratio):
+    def __init__(self, ratio, pool_factor=4):
         """Initialization
 
         Args:
             ratio (float): ratio between latitude and longitude dimensions of the data
+            pool_factor (int): pooling factor (kernel size for unpooling)
         """
         self.ratio = ratio
-        self.kernel_size = 4
+        self.kernel_size = pool_factor
         super().__init__()
 
     def forward(self, x):
@@ -175,20 +179,21 @@ class Equiangular:
     """Equiangular class, which groups together the corresponding pooling and unpooling.
     """
 
-    def __init__(self, ratio=1, mode="average"):
+    def __init__(self, ratio=1, pool_factor=4, mode="average"):
         """Initialize equiangular pooling and unpooling objects.
 
         Args:
             ratio (float): ratio between latitude and longitude dimensions of the data
+            pool_factor (int): pooling factor (kernel size for pooling/unpooling)
             mode (str, optional): specify the mode for pooling/unpooling.
                                     Can be maxpooling or averagepooling. Defaults to 'average'.
         """
         if mode == "max":
-            self.__pooling = EquiangularMaxPool(ratio)
-            self.__unpooling = EquiangularMaxUnpool(ratio)
+            self.__pooling = EquiangularMaxPool(ratio, pool_factor)
+            self.__unpooling = EquiangularMaxUnpool(ratio, pool_factor)
         else:
-            self.__pooling = EquiangularAvgPool(ratio)
-            self.__unpooling = EquiangularAvgUnpool(ratio)
+            self.__pooling = EquiangularAvgPool(ratio, pool_factor)
+            self.__unpooling = EquiangularAvgUnpool(ratio, pool_factor)
 
     @property
     def pooling(self):

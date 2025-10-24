@@ -78,23 +78,64 @@ class Encoder(nn.Module):
     """Encoder for the Spherical UNet.
     """
 
-    def __init__(self, pooling, laps, kernel_size):
+    def __init__(self, pooling, laps, kernel_size, depth, input_channels=16, embed_size=64):
         """Initialization.
 
         Args:
             pooling (:obj:`torch.nn.Module`): pooling layer.
             laps (list): List of laplacians.
             kernel_size (int): polynomial degree.
+            depth (int): Number of encoding levels.
+            input_channels (int): Number of input channels.
+            embed_size (int): Base embedding dimension, scales up through the network.
         """
         super().__init__()
         self.pooling = pooling
         self.kernel_size = kernel_size
-        self.enc_l5 = SphericalChebBN2(16, 32, 64, laps[5], self.kernel_size)
-        self.enc_l4 = SphericalChebBNPool(64, 128, laps[4], self.pooling, self.kernel_size)
-        self.enc_l3 = SphericalChebBNPool(128, 256, laps[3], self.pooling, self.kernel_size)
-        self.enc_l2 = SphericalChebBNPool(256, 512, laps[2], self.pooling, self.kernel_size)
-        self.enc_l1 = SphericalChebBNPool(512, 512, laps[1], self.pooling, self.kernel_size)
-        self.enc_l0 = SphericalChebPool(512, 512, laps[0], self.pooling, self.kernel_size)
+        self.depth = depth
+        self.embed_size = embed_size
+        
+        # Use configurable embed_size with scaling pattern:
+        # input_channels → embed_size//2 → embed_size (first layer)
+        # embed_size → embed_size*2, embed_size*2 → embed_size*4, etc. (subsequent layers)
+        
+        if depth == 2:
+            self.encoder_layers = nn.ModuleList([
+                SphericalChebBN2(input_channels, embed_size//2, embed_size, laps[depth-1], self.kernel_size),
+                SphericalChebBNPool(embed_size, embed_size*2, laps[depth-2], self.pooling, self.kernel_size)
+            ])
+        elif depth == 3:
+            self.encoder_layers = nn.ModuleList([
+                SphericalChebBN2(input_channels, embed_size//2, embed_size, laps[depth-1], self.kernel_size),
+                SphericalChebBNPool(embed_size, embed_size*2, laps[depth-2], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*2, embed_size*4, laps[depth-3], self.pooling, self.kernel_size)
+            ])
+        elif depth == 4:
+            self.encoder_layers = nn.ModuleList([
+                SphericalChebBN2(input_channels, embed_size//2, embed_size, laps[depth-1], self.kernel_size),
+                SphericalChebBNPool(embed_size, embed_size*2, laps[depth-2], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*2, embed_size*4, laps[depth-3], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*4, embed_size*8, laps[depth-4], self.pooling, self.kernel_size)
+            ])
+        elif depth == 5:
+            self.encoder_layers = nn.ModuleList([
+                SphericalChebBN2(input_channels, embed_size//2, embed_size, laps[depth-1], self.kernel_size),
+                SphericalChebBNPool(embed_size, embed_size*2, laps[depth-2], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*2, embed_size*4, laps[depth-3], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*4, embed_size*8, laps[depth-4], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*8, embed_size*16, laps[depth-5], self.pooling, self.kernel_size)
+            ])
+        elif depth == 6:
+            self.encoder_layers = nn.ModuleList([
+                SphericalChebBN2(input_channels, embed_size//2, embed_size, laps[depth-1], self.kernel_size),
+                SphericalChebBNPool(embed_size, embed_size*2, laps[depth-2], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*2, embed_size*4, laps[depth-3], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*4, embed_size*8, laps[depth-4], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*8, embed_size*16, laps[depth-5], self.pooling, self.kernel_size),
+                SphericalChebBNPool(embed_size*16, embed_size*32, laps[depth-6], self.pooling, self.kernel_size)
+            ])
+        else:
+            raise ValueError(f"Depth {depth} not supported yet. Please use depth 2, 3, or 4.")
 
     def forward(self, x):
         """Forward Pass.
@@ -103,16 +144,18 @@ class Encoder(nn.Module):
             x (:obj:`torch.Tensor`): input [batch x vertices x channels/features]
 
         Returns:
-            x_enc* :obj: `torch.Tensor`: output [batch x vertices x channels/features]
+            list: List of encoder outputs at each level
         """
-        x_enc5 = self.enc_l5(x)
-        x_enc4 = self.enc_l4(x_enc5)
-        x_enc3 = self.enc_l3(x_enc4)
-        x_enc2 = self.enc_l2(x_enc3)
-        x_enc1 = self.enc_l1(x_enc2)
-        x_enc0 = self.enc_l0(x_enc1)
-
-        return x_enc0, x_enc1, x_enc2, x_enc3, x_enc4
+        encoder_outputs = []
+        current_x = x
+        
+        # Process through all encoder layers
+        for i, layer in enumerate(self.encoder_layers):
+            current_x = layer(current_x)
+            encoder_outputs.append(current_x)
+        
+        # Return outputs in reverse order (finest to coarsest)
+        return encoder_outputs[::-1]
 
 
 class EncoderTemporalConv(Encoder):
